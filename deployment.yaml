@@ -15,7 +15,7 @@ spec:
       serviceAccountName: umami-controller-account
       containers:
         - name: umami-controller
-          image: harbor.k8s.inpt.fr/net7/umami-controller
+          image: ghcr.io/ewen-lbh/umami-controller
           env: 
             - name: HOST
               value: https://stats.inpt.fr
