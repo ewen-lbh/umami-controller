@@ -51,6 +51,13 @@ type websiteCreatePayload struct {
 }
 type websiteCreateResponse = umamiWebsite
 
+type websiteUpdatePayload struct {
+	Name   string `json:"name",omitempty`
+	Domain string `json:"domain",omitempty`
+}
+
+type websiteUpdateResponse = umamiWebsite
+
 func apiQuery[O any](u *Umami, path, token string) (O, error) {
 	url, _ := url.JoinPath(u.Host, path)
 	request, _ := http.NewRequest("GET", url, nil)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spotahome/kooper/v2/controller"
 	kooperlogrus "github.com/spotahome/kooper/v2/log/logrus"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,11 +30,15 @@ import (
 	"k8s.io/client-go/util/homedir"
 )
 
-var nginxSnippetTemplate, _ = template.New("nginx snippet").Parse(`
+const SNIPPET_BEGIN_MARKER = "# Begin Umami snippet"
+const SNIPPET_END_MARKER = "# End Umami snippet"
+
+var nginxSnippetTemplate, _ = template.New("nginx snippet").Parse(fmt.Sprintf(`
+	%s
 	sub_filter "</head>" "<script async src=https://stats.inpt.fr/script.js data-website-id={{ .ID }}></script></head>";
-	# The http_sub_module doesn't support compression from the ingress to the backend application
 	proxy_set_header Accept-Encoding "";
-`)
+	%s
+`, SNIPPET_BEGIN_MARKER, SNIPPET_END_MARKER))
 
 type annotationPatch struct {
 	Metadata struct {
@@ -39,8 +46,17 @@ type annotationPatch struct {
 	} `json:"metadata"`
 }
 
-func run() error {
-	logger := kooperlogrus.New(logrus.NewEntry(logrus.New()))
+type websiteInjectConfig struct {
+	Inject string
+	Name   string
+}
+
+type previousWebsiteInjectConfigs map[string]websiteInjectConfig
+
+func run(umami Umami, level logrus.Level) error {
+	logconfig := logrus.New()
+	logconfig.SetLevel(level)
+	logger := kooperlogrus.New(logrus.NewEntry(logconfig))
 	k8sconfig, err := rest.InClusterConfig()
 	if err != nil {
 		// No in cluster? letr's try locally
@@ -50,6 +66,7 @@ func run() error {
 			return fmt.Errorf("error loading kubernetes configuration: %w", err)
 		}
 	}
+	latestConfigs := previousWebsiteInjectConfigs{}
 	k8scli, _ := kubernetes.NewForConfig(k8sconfig)
 	retriever := controller.MustRetrieverFromListerWatcher(&cache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
@@ -74,7 +91,7 @@ func run() error {
 			}
 		}
 		if modeOrHost == "" {
-			logger.Debugf("Skipping resource, no annotation")
+			logger.Debugf("%s: Skipping resource, no annotation", ingress.Name)
 			return nil
 		}
 		hosts := mapset.NewSet[string]()
@@ -86,14 +103,20 @@ func run() error {
 			hosts.Add(modeOrHost)
 		}
 
+		// Check if the ingress has already been processed
+		latestConfig := latestConfigs[ingress.Namespace+"/"+ingress.Name]
+		if latestConfig.Inject == modeOrHost && latestConfig.Name == title {
+			logger.Debugf("%s/%s: Skipping resource, already processed, no changes since %#v", ingress.Namespace, ingress.Name, latestConfig)
+			return nil
+		}
+
+		latestConfigs[ingress.Namespace+"/"+ingress.Name] = websiteInjectConfig{
+			Inject: modeOrHost,
+			Name:   title,
+		}
+
 		logger.Infof("%s/%s: Injecting in %v (umami.is/inject=%s)", ingress.Namespace, ingress.Name, hosts, modeOrHost)
 		annotations := ingress.DeepCopy().Annotations
-
-		umami := Umami{
-			Namespace:      os.Getenv("NAMESPACE"),
-			AdminSecretRef: os.Getenv("ADMIN_SECRET_REF"),
-			Host:           os.Getenv("HOST"),
-		}
 
 		adminSecret, err := k8scli.CoreV1().Secrets(umami.Namespace).Get(ctx, umami.AdminSecretRef, metav1.GetOptions{})
 		if err != nil {
@@ -137,29 +160,39 @@ func run() error {
 				}
 			}
 
+			if title == "" {
+				title = cases.Title(language.English).String(ingress.Namespace)
+			}
+
 			if !found {
 				logger.Infof("Creating website...")
 				createPayload := websiteCreatePayload{
 					Domain: host,
-					Name:   ingress.Namespace,
-				}
-				if title != "" {
-					createPayload = websiteCreatePayload{
-						Domain: createPayload.Domain,
-						Name:   title,
-					}
+					Name:   cases.Title(language.English).String(ingress.Namespace),
 				}
 				umamiWebsite, err = apiRequest[websiteCreatePayload, websiteCreateResponse](&umami, "POST", "/api/websites", creds.Token, createPayload)
 				if err != nil {
 					return fmt.Errorf("while creating new website with %#v: %w", createPayload, err)
 				}
+			} else {
+				logger.Infof("Updating website...")
+				umamiWebsite, err = apiRequest[websiteUpdatePayload, websiteUpdateResponse](&umami, "POST", fmt.Sprintf("/api/websites/%s", umamiWebsite.ID), creds.Token, websiteUpdatePayload{
+					Name: title,
+					Domain: host,
+				})
+				if err != nil {
+					return fmt.Errorf("while updating website: %w", err)
+				}
+
 			}
 
 			logger.Infof("Using umami website %#v", umamiWebsite)
 
 			var annotationValue bytes.Buffer
 			nginxSnippetTemplate.Execute(&annotationValue, umamiWebsite)
-			annotations["nginx.ingress.kubernetes.io/configuration-snippet"] = annotationValue.String()
+
+			// Replace snippet between # Begin Umami snippet and # End Umami snippet
+			annotations["nginx.ingress.kubernetes.io/configuration-snippet"] = replaceOrAppend(annotations["nginx.ingress.kubernetes.io/configuration-snippet"], SNIPPET_BEGIN_MARKER, SNIPPET_END_MARKER, annotationValue.String())
 
 			logger.Infof("Patching ingress annotation: setting configuration snippet to %q", annotationValue.String())
 
@@ -205,8 +238,29 @@ func run() error {
 	return nil
 }
 
+// replaceOrAppend replaces the content between two strings in a string. If the start or end string is not found, the string is appended to the end.
+func replaceOrAppend(s, start, end, replace string) string {
+	i := strings.Index(s, start)
+	if i == -1 {
+		return s + replace
+	}
+	i += len(start)
+	j := strings.Index(s[i:], end)
+	if j == -1 {
+		return s + replace
+	}
+	j += i
+	return s[:i] + replace + s[j:]
+}
+
 func main() {
-	err := run()
+	umami := Umami{
+		Namespace:      os.Getenv("NAMESPACE"),
+		AdminSecretRef: os.Getenv("ADMIN_SECRET_REF"),
+		Host:           os.Getenv("HOST"),
+	}
+	fmt.Printf("Starting umami controller with %#v\n", umami)
+	err := run(umami, logrus.DebugLevel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error runninng umami controller: %s", err)
 		os.Exit(1)
