@@ -260,7 +260,7 @@ func main() {
 		Host:           os.Getenv("HOST"),
 	}
 	fmt.Printf("Starting umami controller with %#v\n", umami)
-	err := run(umami, logrus.DebugLevel)
+	err := run(umami, logrus.InfoLevel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error runninng umami controller: %s", err)
 		os.Exit(1)
