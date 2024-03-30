@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: umami
+  name: umami-controller
+spec:
+  selector:
+    matchLabels:
+      app: umami-controller
+  template:
+    metadata:
+      labels:
+        app: umami-controller
+    spec:
+      serviceAccountName: umami-controller-account
+      containers:
+        - name: umami-controller
+          image: harbor.k8s.inpt.fr/net7/umami-controller
+          env: 
+            - name: HOST
+              value: https://stats.inpt.fr
+            - name: ADMIN_SECRET_REF
+              value: umami-controller-secret
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          
