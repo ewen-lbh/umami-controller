@@ -168,7 +168,7 @@ func run(umami Umami, level logrus.Level) error {
 				logger.Infof("Creating website...")
 				createPayload := websiteCreatePayload{
 					Domain: host,
-					Name:   cases.Title(language.English).String(ingress.Namespace),
+					Name:   title,
 				}
 				umamiWebsite, err = apiRequest[websiteCreatePayload, websiteCreateResponse](&umami, "POST", "/api/websites", creds.Token, createPayload)
 				if err != nil {
@@ -177,8 +177,8 @@ func run(umami Umami, level logrus.Level) error {
 			} else {
 				logger.Infof("Updating website...")
 				umamiWebsite, err = apiRequest[websiteUpdatePayload, websiteUpdateResponse](&umami, "POST", fmt.Sprintf("/api/websites/%s", umamiWebsite.ID), creds.Token, websiteUpdatePayload{
-					Name: title,
 					Domain: host,
+					Name:   title,
 				})
 				if err != nil {
 					return fmt.Errorf("while updating website: %w", err)
